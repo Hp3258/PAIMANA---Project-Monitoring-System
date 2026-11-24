@@ -1,10 +1,11 @@
 """
-SIH 2026 — PS26103 | Phase 6: Cost Overrun Model Training
-=========================================================
-Trains an XGBoost classification model to predict 3-Month Future Cost Overrun Risk.
+SIH 2026 — PS26103 | Phase 6: Cost Overrun Model Training (CatBoost Standard Argmax)
+=====================================================================================
+Trains a CatBoost classification model to predict 3-Month Future Cost Overrun Risk.
 - Uses strict temporal validation split (no look-ahead leakage).
-- Uses XGBoost native categorical support (histogram-based tree method).
+- Uses CatBoost native categorical support (ministry, sector, state).
 - Handles extreme class imbalance using balanced sample weighting.
+- Standard argmax decision policy.
 - Optional Optuna hyperparameter optimization (--tune).
 
 Usage:
@@ -19,7 +20,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 from loguru import logger
-import xgboost as xgb
+from catboost import CatBoostClassifier
 from sklearn.metrics import classification_report, f1_score, roc_auc_score
 from sklearn.utils.class_weight import compute_sample_weight
 import joblib
@@ -81,13 +82,12 @@ def prepare_data():
         'schedule_delay_months', 'ministry', 'sector', 'state'
     ]
     
-    # Native Categoricals: cast to category and align test categories to train
     cat_cols = ['ministry', 'sector', 'state']
     category_mappings = {}
     for col in cat_cols:
-        train_df[col] = train_df[col].astype('category')
-        category_mappings[col] = list(train_df[col].cat.categories)
-        test_df[col] = pd.Categorical(test_df[col], categories=category_mappings[col])
+        train_df[col] = train_df[col].fillna('Unknown').astype(str)
+        test_df[col] = test_df[col].fillna('Unknown').astype(str)
+        category_mappings[col] = sorted(train_df[col].unique().tolist())
         
     X_train = train_df[feature_cols]
     y_train = train_df['target_cost_overrun_class']
@@ -98,38 +98,35 @@ def prepare_data():
     return X_train, y_train, X_test, y_test, feature_cols, cat_cols, category_mappings
 
 
-def tune_hyperparameters(X_train, y_train, X_test, y_test, sample_weights, n_trials=25):
-    """Run Optuna study to find optimal XGBoost parameters."""
+def tune_hyperparameters(X_train, y_train, X_test, y_test, cat_cols, sample_weights, n_trials=25):
+    """Run Optuna study to find optimal CatBoost parameters."""
     if optuna is None:
         logger.warning("Optuna not installed. Using default parameters.")
         return {}
         
-    logger.info(f"Starting Optuna hyperparameter optimization ({n_trials} trials)...")
+    logger.info(f"Starting Optuna hyperparameter optimization for CatBoost ({n_trials} trials)...")
     
     def objective(trial):
         params = {
-            'objective': 'multi:softprob',
-            'num_class': 3,
-            'eval_metric': 'mlogloss',
-            'tree_method': 'hist',
-            'enable_categorical': True,
-            'random_state': 42,
-            'n_estimators': trial.suggest_int('n_estimators', 80, 250),
-            'max_depth': trial.suggest_int('max_depth', 3, 7),
+            'loss_function': 'MultiClass',
+            'random_seed': 42,
+            'verbose': False,
+            'allow_writing_files': False,
+            'iterations': trial.suggest_int('iterations', 200, 700),
+            'depth': trial.suggest_int('depth', 4, 8),
             'learning_rate': trial.suggest_float('learning_rate', 0.02, 0.15, log=True),
-            'subsample': trial.suggest_float('subsample', 0.6, 0.95),
-            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 0.95),
-            'min_child_weight': trial.suggest_int('min_child_weight', 1, 6)
+            'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1.0, 10.0),
         }
         
-        clf = xgb.XGBClassifier(**params)
+        clf = CatBoostClassifier(cat_features=cat_cols, **params)
         clf.fit(
             X_train, y_train,
             sample_weight=sample_weights,
-            eval_set=[(X_test, y_test)],
+            eval_set=(X_test, y_test),
+            early_stopping_rounds=20,
             verbose=False
         )
-        preds = clf.predict(X_test)
+        preds = clf.predict(X_test).ravel().astype(int)
         return f1_score(y_test, preds, average='macro', zero_division=0)
 
     study = optuna.create_study(direction='maximize')
@@ -151,40 +148,37 @@ def train_model(tune: bool = False, trials: int = 25):
     sample_weights = compute_sample_weight('balanced', y_train)
     logger.info(f"Class distribution (train):\n{y_train.value_counts().to_dict()}")
     
-    # Model parameters
     best_params = {}
     if tune:
-        best_params = tune_hyperparameters(X_train, y_train, X_test, y_test, sample_weights, n_trials=trials)
+        best_params = tune_hyperparameters(X_train, y_train, X_test, y_test, cat_cols, sample_weights, n_trials=trials)
         
+    # CatBoost hyperparameters matching CostModelNext benchmark architecture
     default_params = {
-        'objective': 'multi:softprob',
-        'num_class': 3,
-        'n_estimators': 150,
+        'loss_function': 'MultiClass',
+        'iterations': 650,
+        'depth': 7,
         'learning_rate': 0.05,
-        'max_depth': 4,
-        'subsample': 0.8,
-        'colsample_bytree': 0.8,
-        'random_state': 42,
-        'enable_categorical': True,
-        'tree_method': 'hist',
-        'eval_metric': 'mlogloss',
-        'early_stopping_rounds': 15
+        'l2_leaf_reg': 8,
+        'random_seed': 42,
+        'verbose': 100,
+        'allow_writing_files': False,
+        'early_stopping_rounds': 30
     }
     default_params.update(best_params)
     
-    logger.info(f"Training XGBoost Classifier with parameters: {default_params}")
-    model = xgb.XGBClassifier(**default_params)
+    logger.info(f"Training CatBoost Classifier with parameters: {default_params}")
+    model = CatBoostClassifier(cat_features=cat_cols, **default_params)
     
     model.fit(
         X_train, y_train,
         sample_weight=sample_weights,
         eval_set=[(X_train, y_train), (X_test, y_test)],
-        verbose=25
+        verbose=100
     )
     
-    # Evaluation
-    logger.info("Evaluating Cost Overrun Model on temporal test set...")
-    y_pred = model.predict(X_test)
+    # Evaluation (Standard Argmax)
+    logger.info("Evaluating Cost Overrun Model (CatBoost standard argmax) on temporal test set...")
+    y_pred = model.predict(X_test).ravel().astype(int)
     y_prob = model.predict_proba(X_test)
     
     report = classification_report(y_test, y_pred, target_names=['Safe', 'Moderate', 'Severe'], zero_division=0)
@@ -208,7 +202,8 @@ def train_model(tune: bool = False, trials: int = 25):
         'features': feature_cols,
         'categorical_columns': cat_cols,
         'category_mappings': category_mappings,
-        'macro_f1': macro_f1
+        'macro_f1': macro_f1,
+        'model_name': 'CatBoost Classifier (Standard Argmax)'
     }, model_path)
     
     logger.info(f"Saved trained cost model artifacts to {model_path}")
@@ -220,17 +215,17 @@ def train_model(tune: bool = False, trials: int = 25):
             tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", f"sqlite:///{db_path}")
             mlflow.set_tracking_uri(tracking_uri)
             mlflow.set_experiment("paimana_infrastructure_risk")
-            with mlflow.start_run(run_name=f"cost_model_{datetime.now():%Y%m%d_%H%M}"):
+            with mlflow.start_run(run_name=f"catboost_cost_model_{datetime.now():%Y%m%d_%H%M}"):
                 mlflow.log_params(default_params)
                 mlflow.log_metric("macro_f1", float(macro_f1))
                 mlflow.log_artifact(str(model_path))
-                logger.info("Logged cost model training run and artifact to MLflow.")
+                logger.info("Logged CatBoost cost model training run and artifact to MLflow.")
         except Exception as e:
             logger.warning(f"Could not log to MLflow: {e}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train Cost Overrun Classifier")
+    parser = argparse.ArgumentParser(description="Train Cost Overrun Classifier with CatBoost")
     parser.add_argument("--tune", action="store_true", help="Run Optuna hyperparameter optimization")
     parser.add_argument("--trials", type=int, default=25, help="Number of Optuna trials")
     args = parser.parse_args()

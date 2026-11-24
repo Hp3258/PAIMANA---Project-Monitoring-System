@@ -102,9 +102,9 @@ export const AdminPanel: React.FC = () => {
               <Database className="w-6 h-6" />
             </div>
             <div>
-              <h3 className="text-base font-bold text-slate-900">Run Automated Ingestion</h3>
+              <h3 className="text-base font-bold text-slate-900">.</h3>
               <p className="text-xs text-slate-500">
-                Executes clean_master.py, pandera schemas validation, and hydrates PostgreSQL/SQLite tables.
+                ..
               </p>
             </div>
           </div>
@@ -114,7 +114,7 @@ export const AdminPanel: React.FC = () => {
             disabled={ingestMutation.isPending}
             className="w-full py-2.5 px-4 bg-sky-600 hover:bg-sky-500 text-white font-semibold text-sm rounded-lg transition disabled:opacity-50 shadow-sm"
           >
-            {ingestMutation.isPending ? 'Queuing Ingestion Task...' : 'Trigger Pipeline Ingestion'}
+            {ingestMutation.isPending ? 'Queuing Ingestion Task...' : '..'}
           </button>
 
           {ingestMsg && (
@@ -132,9 +132,9 @@ export const AdminPanel: React.FC = () => {
               <RefreshCw className="w-6 h-6" />
             </div>
             <div>
-              <h3 className="text-base font-bold text-slate-900">Retrain ML Models (XGBoost + LightGBM)</h3>
+              <h3 className="text-base font-bold text-slate-900">.</h3>
               <p className="text-xs text-slate-500">
-                Builds causal lag features, retrains Cost/Delay models, and re-calculates SHAP explanations.
+                .
               </p>
             </div>
           </div>
@@ -144,7 +144,7 @@ export const AdminPanel: React.FC = () => {
             disabled={retrainMutation.isPending}
             className="w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-sm rounded-lg transition disabled:opacity-50 shadow-sm"
           >
-            {retrainMutation.isPending ? 'Queuing Retraining Task...' : 'Trigger Model Retraining'}
+            {retrainMutation.isPending ? 'Queuing Retraining Task...' : '..'}
           </button>
 
           {retrainMsg && (
@@ -219,11 +219,10 @@ export const AdminPanel: React.FC = () => {
                     <td className="py-2.5 px-3 font-mono text-xs text-slate-600">{u.email}</td>
                     <td className="py-2.5 px-3 text-center">
                       <span
-                        className={`px-2 py-0.5 rounded-full text-xs font-bold ${
-                          u.role === 'admin'
-                            ? 'bg-purple-100 text-purple-800'
-                            : 'bg-sky-100 text-sky-800'
-                        }`}
+                        className={`px-2 py-0.5 rounded-full text-xs font-bold ${u.role === 'admin'
+                          ? 'bg-purple-100 text-purple-800'
+                          : 'bg-sky-100 text-sky-800'
+                          }`}
                       >
                         {u.role}
                       </span>

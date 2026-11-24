@@ -17,6 +17,7 @@ import pandas as pd
 import numpy as np
 import joblib
 import shap
+from catboost import Pool
 from loguru import logger
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -124,20 +125,28 @@ def main():
     
     # Merge project names from master
     master_path = PROJECT_ROOT / "data" / "master" / "project_master.parquet"
-    master = pd.read_parquet(master_path)[['project_uid', 'project_name']]
-    current_data = current_data.merge(master, on='project_uid', how='left')
+    if master_path.exists():
+        master = pd.read_parquet(master_path)[['project_uid', 'project_name']]
+        current_data = current_data.merge(master, on='project_uid', how='left')
+    else:
+        current_data['project_name'] = current_data['project_uid']
     
-    # Prepare features for ML prediction with aligned categoricals
-    X = current_data[feature_cols].copy()
-    for col, categories in category_mappings.items():
-        if col in X.columns:
-            X[col] = pd.Categorical(X[col], categories=categories)
+    # Prepare features for ML prediction
+    # CatBoost expects string/clean categoricals; LightGBM expects aligned pd.Categorical
+    cat_cols = ['ministry', 'sector', 'state']
+    X_cost = current_data[feature_cols].copy()
+    X_delay = current_data[feature_cols].copy()
+    for col in cat_cols:
+        if col in X_cost.columns:
+            X_cost[col] = X_cost[col].fillna('Unknown').astype(str)
+        if col in X_delay.columns and col in category_mappings:
+            X_delay[col] = pd.Categorical(X_delay[col], categories=category_mappings[col])
             
-    logger.info(f"Scoring {len(X)} active projects...")
+    logger.info(f"Scoring {len(X_cost)} active projects...")
     
     # 1. Predict Model Probabilities
-    cost_probs = cost_model.predict_proba(X)   # Classes: [0: Safe, 1: Moderate, 2: Severe]
-    delay_probs = delay_model.predict_proba(X) # Classes: [0: No Delay, 1: Minor, 2: Severe]
+    cost_probs = cost_model.predict_proba(X_cost)   # CatBoost Cost Model: [0: Safe, 1: Moderate, 2: Severe]
+    delay_probs = delay_model.predict_proba(X_delay) # LightGBM Delay Model: [0: No Delay, 1: Minor, 2: Severe]
     
     # Probability of adverse outcome (weighted severity probability)
     cost_severity_prob = (cost_probs[:, 1] * 0.40) + (cost_probs[:, 2] * 1.00)
@@ -181,24 +190,29 @@ def main():
     # 7. Compute SHAP Attribution for Medium & High Risk Projects
     logger.info("Computing SHAP explanations for elevated risk projects...")
     elevated_mask = current_data['risk_band'].isin(['Medium', 'High'])
-    X_elevated = X[elevated_mask]
+    X_cost_elevated = X_cost[elevated_mask]
+    X_delay_elevated = X_delay[elevated_mask]
     
     explanations = []
-    if len(X_elevated) > 0:
-        explainer_cost = shap.TreeExplainer(cost_model)
-        explainer_delay = shap.TreeExplainer(delay_model)
-        
-        shap_cost = explainer_cost.shap_values(X_elevated)
-        shap_delay = explainer_delay.shap_values(X_elevated)
-        
-        # Severe class SHAP values
-        if isinstance(shap_cost, list):
-            target_shap_cost = shap_cost[2]
-        elif hasattr(shap_cost, 'shape') and len(shap_cost.shape) == 3:
-            target_shap_cost = shap_cost[:, :, 2]
+    if len(X_cost_elevated) > 0:
+        # CatBoost native SHAP computation
+        if hasattr(cost_model, "get_feature_importance"):
+            pool_elevated = Pool(X_cost_elevated, cat_features=cat_cols)
+            sv_cat = cost_model.get_feature_importance(pool_elevated, type='ShapValues')
+            target_shap_cost = sv_cat[:, 2, :len(feature_cols)]
         else:
-            target_shap_cost = shap_cost
-            
+            explainer_cost = shap.TreeExplainer(cost_model)
+            shap_cost = explainer_cost.shap_values(X_cost_elevated)
+            if isinstance(shap_cost, list):
+                target_shap_cost = shap_cost[2]
+            elif hasattr(shap_cost, 'shape') and len(shap_cost.shape) == 3:
+                target_shap_cost = shap_cost[:, :, 2]
+            else:
+                target_shap_cost = shap_cost
+                
+        # LightGBM delay SHAP computation
+        explainer_delay = shap.TreeExplainer(delay_model)
+        shap_delay = explainer_delay.shap_values(X_delay_elevated)
         if isinstance(shap_delay, list):
             target_shap_delay = shap_delay[2]
         elif hasattr(shap_delay, 'shape') and len(shap_delay.shape) == 3:
